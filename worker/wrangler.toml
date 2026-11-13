@@ -1,0 +1,16 @@
+name = "advanced-map-reports"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+# once a day, 04:17 UTC: write the grouped rows to the repository
+[triggers]
+crons = ["17 4 * * *"]
+
+[vars]
+GITHUB_REPO = "Brettgod1355/advanced-map-reports"
+
+# fill in the id that `npx wrangler d1 create advanced-map-reports` prints
+[[d1_databases]]
+binding = "DB"
+database_name = "advanced-map-reports"
+database_id = "REPLACE_WITH_THE_D1_DATABASE_ID"
