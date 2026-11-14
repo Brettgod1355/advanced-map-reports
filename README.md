@@ -36,13 +36,42 @@ Nothing reported is added to the map by itself: a row is checked against the gam
 
 ## Setting it up
 
-1. Make this repository public and turn on GitHub Pages for the `main` branch, folder `/docs`.
-2. In `worker/`: `npx wrangler d1 create advanced-map-reports`, put the id it prints in `wrangler.toml`, then
-   `npx wrangler d1 execute advanced-map-reports --remote --file=schema.sql`.
-3. Make a fine-grained GitHub token that can write the contents of this one repository and nothing else, then
-   `npx wrangler secret put GITHUB_TOKEN`. Make up a long random text and `npx wrangler secret put SALT`.
-4. Check `GITHUB_REPO` in `wrangler.toml`, then `npx wrangler deploy`. The address it prints, with `/report` on
-   the end, is where the plugin sends.
+Everything below runs on the free plans of GitHub and Cloudflare. You need Node 20 or newer (`node --version`).
+
+1. **The page.** This repository is public, with GitHub Pages on the `main` branch, folder `/docs` (Settings →
+   Pages). It is served at `https://brettgod1355.github.io/advanced-map-reports/`.
+2. **A Cloudflare account and its workers.dev address.** Sign up at <https://dash.cloudflare.com/sign-up> (free).
+   In the dashboard open **Workers & Pages** once: Cloudflare asks you to pick a `workers.dev` subdomain, for
+   example `brettg`. Every Worker you deploy is then served at `https://<worker name>.<subdomain>.workers.dev`.
+3. **Log Wrangler in.** In a terminal, in this repository's `worker/` folder:
+   `npx wrangler login`. A browser tab opens; allow access. `npx wrangler whoami` then shows your account.
+4. **The database.** Still in `worker/`:
+   - `npx wrangler d1 create advanced-map-reports`. It prints a `database_id`; put it in `wrangler.toml` in place
+     of `REPLACE_WITH_THE_D1_DATABASE_ID`.
+   - `npx wrangler d1 execute advanced-map-reports --remote --file=schema.sql` creates the three tables.
+5. **The GitHub token**, so the Worker can write `docs/data/reports.json` once a day. On GitHub: Settings →
+   Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token. Name it
+   `advanced-map-reports worker`; Repository access: **Only select repositories** → this one; Permissions →
+   Repository permissions → **Contents: Read and write** (nothing else). Pick an expiry and note it in your
+   calendar. Copy the token, then `npx wrangler secret put GITHUB_TOKEN` and paste it when asked. The token is
+   kept by Cloudflare only: never put it in a file here.
+6. **The salt**, the secret that makes a sender's one-day mark impossible to turn back into an address:
+   `npx wrangler secret put SALT` and paste any long random text (for example the output of
+   `node -e "console.log(crypto.randomUUID()+crypto.randomUUID())"`). Nobody needs to know it, you included.
+7. **Deploy.** `npx wrangler deploy`. It prints the Worker's address,
+   `https://advanced-map-reports.<subdomain>.workers.dev`, and the daily schedule (04:17 UTC).
+8. **Check it.** Open that address in a browser: it answers "Advanced Map reports. The data is public: see the
+   repository." Send one test report from a terminal (a ladder by Lumbridge Castle into its cellar):
+
+   ```
+   curl -i -X POST https://advanced-map-reports.<subdomain>.workers.dev/report -H "content-type: application/json" -d "{\"v\":\"1.2\",\"k\":\"o\",\"id\":14880,\"op\":1,\"at\":[3209,3216,0],\"from\":[3210,3216,0],\"to\":[3210,9616,0]}"
+   ```
+
+   It answers `204`. `npx wrangler d1 execute advanced-map-reports --remote --command "SELECT * FROM jumps"` shows
+   the row; delete it with `--command "DELETE FROM jumps"` before real reports come in. The page shows rows after
+   the next daily write (or run it at once from the dashboard: the Worker → Settings → Trigger events → the cron →
+   "Trigger").
+9. **The plugin.** The address with `/report` on the end goes in the plugin's `TransportReports.URL`.
 
 ## Tests
 
