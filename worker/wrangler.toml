@@ -13,4 +13,4 @@ GITHUB_REPO = "Brettgod1355/advanced-map-reports"
 [[d1_databases]]
 binding = "DB"
 database_name = "advanced-map-reports"
-database_id = "REPLACE_WITH_THE_D1_DATABASE_ID"
+database_id = "2534a150-3d13-4f88-b1a4-ca336de2ef3e"
