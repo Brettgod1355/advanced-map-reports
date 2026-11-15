@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { clean, day, file, key, mark } from '../src/reports.js';
+import { STATUSES, clean, day, file, key, mark, session, sessionId } from '../src/reports.js';
 
 const good = { v: '1.2', k: 'o', id: 14880, op: 1, at: [3209, 3216, 0], from: [3210, 3216, 0], to: [3210, 9616, 0] };
 
@@ -52,8 +52,33 @@ test('the public file has no marks and the most reported first', () => {
 	const text = file([row(1, 1, 9, '2026-11-13'), row(2, 3, 3, '2026-11-02'), row(3, 1, 9, '2026-11-14')]);
 	const rows = JSON.parse(text);
 	assert.deepEqual(rows.map((r) => r.id), [2, 3, 1]);
-	assert.deepEqual(Object.keys(rows[0]), ['k', 'id', 'op', 'at', 'from', 'to', 'reports', 'people', 'first', 'last', 'v']);
+	assert.deepEqual(Object.keys(rows[0]), ['key', 'k', 'id', 'op', 'at', 'from', 'to', 'reports', 'people', 'first', 'last', 'v',
+		'status']);
+	// a row from before statuses is new; a marked one says so
+	assert.equal(rows[0].status, '');
+	assert.equal(JSON.parse(file([{ ...row(1, 1, 1, '2026-11-13'), status: 'ignored' }]))[0].status, 'ignored');
 	assert.deepEqual(rows[0].to, [5, 6, 0]);
 	assert.ok(!text.includes('never shown'));
 	assert.equal(file([]), '[]\n');
+});
+
+test('a sign-in is good for its account until it runs out, and cannot be made or changed without the secret', async () => {
+	const until = Date.UTC(2026, 11, 15);
+	const token = await session('50088793', until, 'secret');
+	assert.match(token, /^50088793[.][0-9]+[.][0-9A-Za-z_-]{43}$/);
+	assert.equal(await sessionId(token, until - 1, 'secret'), '50088793');
+	assert.equal(await sessionId(token, until, 'secret'), null);
+	assert.equal(await sessionId(token, until - 1, 'another'), null);
+	// another account, or a later end, under the same signature
+	const [id, end, sign] = token.split('.');
+	assert.equal(await sessionId(['1', end, sign].join('.'), until - 1, 'secret'), null);
+	assert.equal(await sessionId([id, String(until * 2), sign].join('.'), until - 1, 'secret'), null);
+	for (const bad of [null, undefined, 42, '', 'a.b.c', id + '.' + end, id + '.' + end + '.', token + 'x']) {
+		assert.equal(await sessionId(bad, until - 1, 'secret'), null, String(bad));
+	}
+	// no secret set on the receiver: nothing is signed with a guessable one, and nothing passes
+	await assert.rejects(session('50088793', until, undefined));
+	assert.equal(await sessionId(token, until - 1, undefined), null);
+	assert.equal(await sessionId(token, until - 1, ''), null);
+	assert.deepEqual(STATUSES, ['', 'investigating', 'added', 'ignored']);
 });

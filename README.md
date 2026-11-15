@@ -34,7 +34,15 @@ The setting is off by default and warns before it turns on.
 - `worker/`: a Cloudflare Worker. `POST /report` checks a report (`src/reports.js`), counts it on its row in a D1
   database (`schema.sql`), and every half hour writes the rows to `docs/data/reports.json` in this repository when
   they changed.
-- `docs/`: the page GitHub Pages serves. It reads `data/reports.json` and `data/names.json`.
+- `docs/`: the page GitHub Pages serves. It reads `data/reports.json` and `data/names.json`, and asks the Worker
+  when it last synced (`GET /synced`) for its "Last sync" line.
+- **Statuses.** Each row has a status: New, Investigating, Added to map or Ignoring. Rows marked Added to map or
+  Ignoring are hidden on the page until "Show added and ignored" is ticked, and a row keeps its status when it is
+  reported again. Only the plugin's author can set one: "Author sign-in" on the page goes to GitHub and back
+  (`GET /login`, `GET /callback`), the Worker checks that the account is the one in `ADMIN_ID`, and the page then
+  gets a sign-in good for 30 days, kept in that browser. Signed in, the page reads the rows live (`GET /rows`) and
+  each row has a dropdown (`POST /status`). The sign-in asks GitHub for no permissions; GitHub's token is used to
+  ask which account it is and then dropped. Any other account is turned away and nothing about it is kept.
 
 Nothing reported is added to the map by itself: a row is checked against the game before it becomes a transport.
 
@@ -76,11 +84,27 @@ Everything below runs on the free plans of GitHub and Cloudflare. You need Node 
    the next half-hourly write (or run it at once from the dashboard: the Worker → Settings → Trigger events → the cron →
    "Trigger").
 9. **The plugin.** The address with `/report` on the end goes in the plugin's `TransportReports.URL`.
+10. **The author's sign-in**, for setting statuses on the page.
+    - On GitHub: Settings → Developer settings → **OAuth Apps** → New OAuth App. Application name:
+      `Advanced Map reports`. Homepage URL: `https://brettgod1355.github.io/advanced-map-reports/`. Authorization
+      callback URL: the Worker's address with `/callback` on the end,
+      `https://advanced-map-reports.<subdomain>.workers.dev/callback`. Leave "Enable Device Flow" off. Register.
+    - The app's page shows its **Client ID**. In `worker/`: `npx wrangler secret put GITHUB_CLIENT_ID` and paste it.
+    - **Generate a new client secret** on the same page, copy it, then
+      `npx wrangler secret put GITHUB_CLIENT_SECRET` and paste it. Like the token, it is kept by Cloudflare only.
+    - `wrangler.toml` holds the two things that are not secret: `SITE`, the page's address, and `ADMIN_ID`, the
+      numeric id of the one GitHub account that may sign in (the number before the `+` in that account's noreply
+      address, or `id` at `https://api.github.com/users/<name>`).
+    - A database made before statuses needs its new column and table once:
+      `npx wrangler d1 execute advanced-map-reports --remote --command "ALTER TABLE jumps ADD COLUMN status TEXT NOT NULL DEFAULT ''"`
+      and `npx wrangler d1 execute advanced-map-reports --remote --file=schema.sql` (it only adds what is missing).
+    - `npx wrangler deploy`, then open the page and click "Author sign-in" at the bottom.
 
 ## Tests
 
-`cd worker && npm test` (Node 20 or newer; nothing to install). They cover the checks, the grouping and the public
-file. The parts that talk to the database and to GitHub are not covered by tests.
+`cd worker && npm test` (Node 20 or newer; nothing to install). They cover the checks, the grouping, the public
+file, the sign-in and the status routes, with a stand-in for the database and for GitHub's answers. Taking a
+report into the real database is not covered by tests.
 
 ## The names file
 

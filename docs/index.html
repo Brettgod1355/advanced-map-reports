@@ -23,10 +23,13 @@ p { margin: 8px 0; max-width: 70ch; }
 .muted { color: var(--muted); }
 a { color: var(--accent); }
 .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 20px 0 10px; }
-input[type=search] {
-	flex: 1 1 240px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+input[type=search], select {
+	padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
 	color: var(--text); font: inherit;
 }
+input[type=search] { flex: 1 1 240px; }
+td select { padding: 4px 6px; }
+label.check { display: inline-flex; gap: 6px; align-items: center; }
 .wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
 th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -39,6 +42,9 @@ td.num, th.num { text-align: right; }
 .empty { padding: 24px; text-align: center; color: var(--muted); }
 details { margin-top: 20px; }
 summary { cursor: pointer; font-weight: 600; }
+.owner { margin-top: 20px; font-size: 14px; }
+.owner button { all: unset; cursor: pointer; color: var(--accent); text-decoration: underline; }
+.owner button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -47,17 +53,21 @@ summary { cursor: pointer; font-weight: 600; }
 <p class="muted">Ways around the game that players took and that the Advanced Map plugin for RuneLite has no transport for yet.</p>
 <p>A row is one way: the thing used, where it stands, and where it leads. <strong>People</strong> counts the
 separate senders that reported it, a day at a time; <strong>Reports</strong> counts every report. A way many people
-report is most likely real; a way reported once may be a mistake.</p>
+report is most likely real; a way reported once may be a mistake. <strong>Status</strong> is what the plugin's
+author has done about it so far.</p>
 
 <div class="bar">
 	<input type="search" id="filter" placeholder="Filter by name, option or id" aria-label="Filter the rows">
+	<label class="check"><input type="checkbox" id="handled"> <span id="handledText">Show added and ignored</span></label>
 	<span class="muted" id="count" role="status"></span>
 </div>
+<p class="muted" id="note" role="status" hidden></p>
 <div class="wrap">
 	<table>
 		<thead>
 			<tr>
 				<th><button data-sort="name">Used</button></th>
+				<th><button data-sort="status">Status</button></th>
 				<th><button data-sort="k">Kind</button></th>
 				<th class="num"><button data-sort="id">Id</button></th>
 				<th>It stands at</th>
@@ -74,6 +84,7 @@ report is most likely real; a way reported once may be a mistake.</p>
 	</table>
 	<div class="empty" id="empty" hidden>No reports yet.</div>
 </div>
+<p class="muted" id="synced" hidden></p>
 
 <details>
 	<summary>What is collected, and what is not</summary>
@@ -86,16 +97,54 @@ report is most likely real; a way reported once may be a mistake.</p>
 	more than 60 reports a day. The address is never stored, and the marks are deleted after two days. Names and menu
 	options on this page are looked up from the game's data by id.</p>
 	<p>The rows are in <a href="data/reports.json">data/reports.json</a>, written every half hour when they change.</p>
+	<p>Each row's status is set by the plugin's author, who signs in with GitHub below. The sign-in asks GitHub for
+	no permissions and is good for that one account only; any other account is turned away, and nothing about it is
+	kept.</p>
+	<p>To show "Last sync", this page asks the receiver when it last wrote the rows. That request says nothing about
+	you beyond what any visit to a website does, and nothing about it is stored.</p>
 </details>
+
+<p class="muted owner" id="owner"></p>
 </main>
 <script>
+// the receiver (worker/): the public rows come from this site's own data file, the owner's sign-in and status
+// changes go to the receiver
+const RECEIVER = location.hostname === 'localhost' ? 'http://localhost:8787'
+	: 'https://advanced-map-reports.brettgodfrey96.workers.dev';
+const STATUS = { '': 'New', investigating: 'Investigating', added: 'Added to map', ignored: 'Ignoring' };
+// hidden until "Show added and ignored" is ticked: the map has the way now, or it is not one for the map
+const HANDLED = ['added', 'ignored'];
+const KEPT = 'advanced-map-reports-session';
+
 const tile = (t) => t.join(', ');
 const body = document.getElementById('rows');
 const filter = document.getElementById('filter');
+const handled = document.getElementById('handled');
+const handledText = document.getElementById('handledText');
 const count = document.getElementById('count');
 const empty = document.getElementById('empty');
+const noteBox = document.getElementById('note');
+const ownerBox = document.getElementById('owner');
 let rows = [];
+let names = { o: {}, n: {} };
 let sort = { by: 'people', down: true };
+// the owner's sign-in while the receiver takes it; null for everyone else
+let owner = null;
+
+// a browser may refuse storage (a private window): the page then works signed out
+function kept() {
+	try { return localStorage.getItem(KEPT); } catch (e) { return null; }
+}
+function keep(token) {
+	try {
+		if (token) { localStorage.setItem(KEPT, token); } else { localStorage.removeItem(KEPT); }
+	} catch (e) { /* nothing kept */ }
+}
+
+function note(text) {
+	noteBox.textContent = text;
+	noteBox.hidden = !text;
+}
 
 function cell(text, cls) {
 	const td = document.createElement('td');
@@ -105,9 +154,54 @@ function cell(text, cls) {
 	return td;
 }
 
+async function save(row, status) {
+	try {
+		const done = await fetch(RECEIVER + '/status', {
+			method: 'POST',
+			headers: { authorization: 'Bearer ' + owner, 'content-type': 'application/json' },
+			body: JSON.stringify({ key: row.key, status }),
+		});
+		if (done.status === 401) {
+			keep(null);
+			owner = null;
+			note('The sign-in has run out. Sign in again to set a status.');
+		} else if (!done.ok) {
+			note('The status was not saved (the receiver answered ' + done.status + ').');
+		} else {
+			row.status = status;
+			note('Saved. The public list shows it after the next half-hourly write.');
+		}
+	} catch (e) {
+		note('The status was not saved: the receiver could not be reached.');
+	}
+	showOwner();
+	draw();
+}
+
+function statusCell(row) {
+	if (!owner) {
+		return cell(STATUS[row.status]);
+	}
+	const td = document.createElement('td');
+	const select = document.createElement('select');
+	select.setAttribute('aria-label', 'Status of ' + row.name);
+	for (const value of Object.keys(STATUS)) {
+		select.append(new Option(STATUS[value], value));
+	}
+	select.value = row.status;
+	select.addEventListener('change', () => {
+		select.disabled = true;
+		save(row, select.value);
+	});
+	td.append(select);
+	return td;
+}
+
 function draw() {
 	const words = filter.value.trim().toLowerCase();
-	const shown = rows.filter((r) => !words || r.search.includes(words));
+	const done = rows.filter((r) => HANDLED.includes(r.status)).length;
+	const shown = rows.filter((r) => (handled.checked || !HANDLED.includes(r.status))
+		&& (!words || r.search.includes(words)));
 	shown.sort((a, b) => {
 		const x = a[sort.by], y = b[sort.by];
 		const order = typeof x === 'number' ? x - y : String(x).localeCompare(String(y));
@@ -115,13 +209,72 @@ function draw() {
 	});
 	body.replaceChildren(...shown.map((r) => {
 		const tr = document.createElement('tr');
-		tr.append(cell(r.name, 'what'), cell(r.k === 'o' ? 'Object' : 'NPC'), cell(String(r.id), 'num'), cell(tile(r.at)),
-			cell(tile(r.from)), cell(tile(r.to)), cell(String(r.people), 'num'), cell(String(r.reports), 'num'),
-			cell(r.first), cell(r.last), cell(r.v));
+		tr.append(cell(r.name, 'what'), statusCell(r), cell(r.k === 'o' ? 'Object' : 'NPC'), cell(String(r.id), 'num'),
+			cell(tile(r.at)), cell(tile(r.from)), cell(tile(r.to)), cell(String(r.people), 'num'),
+			cell(String(r.reports), 'num'), cell(r.first), cell(r.last), cell(r.v));
 		return tr;
 	}));
 	empty.hidden = rows.length > 0;
+	handledText.textContent = 'Show added and ignored' + (done > 0 ? ' (' + done + ')' : '');
 	count.textContent = rows.length === 0 ? '' : shown.length + ' of ' + rows.length + ' ways';
+}
+
+function showOwner() {
+	if (owner) {
+		const out = document.createElement('button');
+		out.type = 'button';
+		out.textContent = 'Sign out';
+		out.addEventListener('click', () => {
+			keep(null);
+			note('');
+			load();
+		});
+		ownerBox.replaceChildren('Signed in: each row has a status to set. ', out);
+	} else {
+		const sign = document.createElement('a');
+		sign.href = RECEIVER + '/login';
+		sign.textContent = 'Author sign-in';
+		ownerBox.replaceChildren(sign);
+	}
+}
+
+/** The rows: live from the receiver for the signed-in owner, else the public file. */
+async function reports() {
+	owner = null;
+	const token = kept();
+	if (token) {
+		try {
+			const live = await fetch(RECEIVER + '/rows', { headers: { authorization: 'Bearer ' + token } });
+			if (live.ok) {
+				const now = await live.json();
+				owner = token;
+				return now;
+			}
+			if (live.status === 401) {
+				keep(null);
+			}
+		} catch (e) { /* the receiver is away: the public file, without the statuses to set */ }
+	}
+	return fetch('data/reports.json').then((r) => r.json());
+}
+
+function load() {
+	return reports().then((found) => {
+		rows = found.map((r) => {
+			const known = (r.k === 'o' ? names.o : names.n)[r.id];
+			const option = known && known[1][r.op - 1];
+			const name = (option ? option + ' ' : 'Option ' + r.op + ' of ') + (known ? known[0] : 'id ' + r.id);
+			// a status this page does not know (a newer receiver's) reads as new
+			const status = Object.prototype.hasOwnProperty.call(STATUS, r.status) ? r.status : '';
+			return { ...r, status, name, search: (name + ' ' + r.id + ' ' + STATUS[status]).toLowerCase() };
+		});
+		showOwner();
+		draw();
+	}).catch(() => {
+		showOwner();
+		empty.textContent = 'The reports could not be loaded.';
+		empty.hidden = false;
+	});
 }
 
 document.querySelectorAll('th button').forEach((button) => button.addEventListener('click', () => {
@@ -130,22 +283,40 @@ document.querySelectorAll('th button').forEach((button) => button.addEventListen
 	draw();
 }));
 filter.addEventListener('input', draw);
+handled.addEventListener('change', draw);
 
-Promise.all([
-	fetch('data/reports.json').then((r) => r.json()),
-	fetch('data/names.json').then((r) => r.json()).catch(() => ({ o: {}, n: {} })),
-]).then(([reports, names]) => {
-	rows = reports.map((r) => {
-		const known = (r.k === 'o' ? names.o : names.n)[r.id];
-		const option = known && known[1][r.op - 1];
-		const name = (option ? option + ' ' : 'Option ' + r.op + ' of ') + (known ? known[0] : 'id ' + r.id);
-		return { ...r, name, search: (name + ' ' + r.id).toLowerCase() };
-	});
-	draw();
-}).catch(() => {
-	empty.textContent = 'The reports could not be loaded.';
-	empty.hidden = false;
+// back from the sign-in: the outcome is after the "#", which the browser never sends to a server; it is taken off
+// the address at once
+const came = location.hash;
+const signed = /^#session=([0-9A-Za-z._-]+)$/.exec(came);
+if (signed) {
+	keep(signed[1]);
+}
+if (came.startsWith('#session=') || came.startsWith('#signin=')) {
+	history.replaceState(null, '', location.pathname + location.search);
+}
+if (came === '#signin=denied') {
+	note('That GitHub account cannot set statuses here: only the plugin\'s author can.');
+} else if (came === '#signin=failed') {
+	note('The sign-in did not finish. Try again.');
+}
+
+fetch('data/names.json').then((r) => r.json()).catch(() => ({ o: {}, n: {} })).then((found) => {
+	names = found;
+	return load();
 });
+
+// when the receiver's half-hourly run last finished, and when it last had something new to write; in the reader's
+// own time zone. Left out when the receiver cannot say.
+const when = (millis) => new Date(millis).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+fetch(RECEIVER + '/synced').then((r) => (r.ok ? r.json() : null)).then((times) => {
+	if (times && times.synced) {
+		const box = document.getElementById('synced');
+		box.textContent = 'Last sync: ' + when(times.synced) + '. '
+			+ (times.changed ? 'The list last changed ' + when(times.changed) + '. ' : '') + 'It syncs every half hour.';
+		box.hidden = false;
+	}
+}).catch(() => { /* no line */ });
 </script>
 </body>
 </html>

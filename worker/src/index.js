@@ -1,13 +1,125 @@
 // The receiver: takes reports from Advanced Map's optional setting, keeps them grouped in a D1 database, and once a
 // day writes the grouped rows to docs/data/reports.json in the public repository, which the page shows.
-// Needs: a D1 database bound as DB (schema.sql), the secrets SALT and GITHUB_TOKEN, and the variable GITHUB_REPO
-// ("owner/name"). See the README.
-import { PER_DAY, clean, day, file, key, mark } from './reports.js';
+// The owner signs in with GitHub on the page and sets each row's status there (GET /login, GET /callback, GET /rows,
+// POST /status); nobody else can. GET /synced tells the page when the rows were last written.
+// Needs: a D1 database bound as DB (schema.sql), the secrets SALT, GITHUB_TOKEN, GITHUB_CLIENT_ID and
+// GITHUB_CLIENT_SECRET, and the variables GITHUB_REPO ("owner/name"), SITE and ADMIN_ID. See the README.
+import { PER_DAY, SESSION_MILLIS, STATUSES, clean, day, file, key, mark, session, sessionId } from './reports.js';
 
 const MAX_BODY = 512;
 const FILE = 'docs/data/reports.json';
 
-const reply = (status, text) => new Response(text, { status, headers: { 'content-type': 'text/plain' } });
+const AGENT = 'advanced-map-reports';
+/** The cookie that ties a sign-in's return from GitHub to the browser that began it. */
+const STATE = 'state';
+
+const reply = (status, text, headers) => new Response(text, { status, headers: { 'content-type': 'text/plain', ...headers } });
+
+/** Lets the page's scripts, and no other site's, call the owner's routes from a browser. */
+const cors = (env) => ({
+	'access-control-allow-origin': new URL(env.SITE).origin,
+	'access-control-allow-headers': 'authorization, content-type',
+	'access-control-allow-methods': 'GET, POST, OPTIONS',
+	'access-control-max-age': '86400',
+	vary: 'origin',
+});
+
+/** Back to the page with the outcome after its "#", which browsers keep to themselves: it is never sent to a server. */
+const back = (env, outcome) => new Response(null, {
+	status: 302,
+	headers: {
+		location: env.SITE + '#' + outcome,
+		'set-cookie': STATE + '=; Max-Age=0; Path=/callback; HttpOnly; Secure; SameSite=Lax',
+		'cache-control': 'no-store',
+		'referrer-policy': 'no-referrer',
+	},
+});
+
+/** Sends the browser to GitHub to say who it is. No permissions are asked for: only the account's public identity. */
+function login(request, env) {
+	if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+		return reply(503, 'sign-in is not set up');
+	}
+	const state = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
+	const to = new URL('https://github.com/login/oauth/authorize');
+	to.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
+	to.searchParams.set('redirect_uri', new URL('/callback', request.url).href);
+	to.searchParams.set('state', state);
+	to.searchParams.set('allow_signup', 'false');
+	return new Response(null, {
+		status: 302,
+		headers: {
+			location: to.href,
+			'set-cookie': STATE + '=' + state + '; Max-Age=600; Path=/callback; HttpOnly; Secure; SameSite=Lax',
+			'cache-control': 'no-store',
+		},
+	});
+}
+
+/**
+ * GitHub sends the browser back here. Its code is traded for a token, the token answers one question (which account
+ * is this?) and is dropped: it is never stored or sent on. Only the owner's account gets a sign-in for the page.
+ */
+async function callback(request, env) {
+	const url = new URL(request.url);
+	const code = url.searchParams.get('code') || '';
+	const state = url.searchParams.get('state') || '';
+	const cookie = (request.headers.get('cookie') || '').split(/; */).find((c) => c.startsWith(STATE + '='));
+	if (!code || !/^[0-9a-f]{32}$/.test(state) || !cookie || cookie.slice(STATE.length + 1) !== state) {
+		return back(env, 'signin=failed');
+	}
+	const asked = await fetch('https://github.com/login/oauth/access_token', {
+		method: 'POST',
+		headers: { accept: 'application/json', 'content-type': 'application/json', 'user-agent': AGENT },
+		body: JSON.stringify({
+			client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code,
+			redirect_uri: new URL('/callback', request.url).href,
+		}),
+	});
+	const token = asked.ok ? (await asked.json()).access_token : null;
+	if (typeof token !== 'string' || !token) {
+		return back(env, 'signin=failed');
+	}
+	const who = await fetch('https://api.github.com/user', {
+		headers: { authorization: 'Bearer ' + token, accept: 'application/vnd.github+json', 'user-agent': AGENT },
+	});
+	const id = who.ok ? (await who.json()).id : null;
+	if (!Number.isInteger(id) || !env.ADMIN_ID || String(id) !== env.ADMIN_ID) {
+		return back(env, 'signin=denied');
+	}
+	return back(env, 'session=' + await session(env.ADMIN_ID, Date.now() + SESSION_MILLIS, env.SALT));
+}
+
+/** True for a request carrying the owner's sign-in, still good. */
+async function owner(request, env) {
+	const header = request.headers.get('authorization') || '';
+	const id = header.startsWith('Bearer ') ? await sessionId(header.slice(7), Date.now(), env.SALT) : null;
+	return id !== null && id === env.ADMIN_ID;
+}
+
+/** The rows as they are right now, for the signed-in owner: the public file lags by up to half an hour. */
+async function rows(env) {
+	const { results } = await env.DB.prepare('SELECT * FROM jumps').all();
+	return new Response(file(results), {
+		headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...cors(env) },
+	});
+}
+
+/** Sets one row's status: { key, status }. The next half-hourly write puts it in the public file. */
+async function setStatus(request, env) {
+	const text = await request.text();
+	let body = null;
+	try {
+		body = text.length <= MAX_BODY ? JSON.parse(text) : null;
+	} catch (e) {
+		body = null;
+	}
+	if (body === null || typeof body !== 'object' || typeof body.key !== 'string' || !STATUSES.includes(body.status)) {
+		return reply(400, 'not a status', cors(env));
+	}
+	const done = await env.DB.prepare('UPDATE jumps SET status = ?2 WHERE key = ?1').bind(body.key, body.status).run();
+	return reply(done.meta.changes > 0 ? 204 : 404, done.meta.changes > 0 ? null : 'no such row', cors(env));
+}
 
 async function take(request, env) {
 	const text = await request.text();
@@ -49,7 +161,7 @@ async function take(request, env) {
 }
 
 /** Writes the grouped rows to the repository when they differ from what is there, and forgets old one-day marks. */
-async function publish(env) {
+async function write(env) {
 	const cutoff = day(Date.now() - 2 * 86400000);
 	await env.DB.batch([
 		env.DB.prepare('DELETE FROM seen WHERE day < ?1').bind(cutoff),
@@ -91,11 +203,59 @@ async function publish(env) {
 	return 'written';
 }
 
+/**
+ * The half-hourly run: the file is written when the rows changed, and the moment is noted for the page's "Last
+ * sync" (and "last changed", when it wrote). A run that fails notes nothing.
+ */
+async function publish(env) {
+	const outcome = await write(env);
+	const now = String(Date.now());
+	const note = (name) => env.DB.prepare(
+		'INSERT INTO meta (name, value) VALUES (?1, ?2) ON CONFLICT (name) DO UPDATE SET value = ?2').bind(name, now);
+	await env.DB.batch(outcome === 'written' ? [note('synced'), note('changed')] : [note('synced')]);
+	return outcome;
+}
+
+/** When the half-hourly run last finished and when it last wrote the file, for the page: { synced, changed }. */
+async function synced(env) {
+	const { results } = await env.DB.prepare('SELECT name, value FROM meta').all();
+	const at = (name) => {
+		const row = results.find((r) => r.name === name);
+		return row ? Number(row.value) : null;
+	};
+	return new Response(JSON.stringify({ synced: at('synced'), changed: at('changed') }), {
+		headers: { 'content-type': 'application/json', 'cache-control': 'max-age=60', ...cors(env) },
+	});
+}
+
 export default {
 	async fetch(request, env) {
 		const { pathname } = new URL(request.url);
 		if (request.method === 'POST' && pathname === '/report') {
 			return take(request, env);
+		}
+		if (request.method === 'GET' && pathname === '/synced') {
+			return synced(env);
+		}
+		if (request.method === 'GET' && pathname === '/login') {
+			return login(request, env);
+		}
+		if (request.method === 'GET' && pathname === '/callback') {
+			return callback(request, env);
+		}
+		if (pathname === '/rows' || pathname === '/status') {
+			if (request.method === 'OPTIONS') {
+				return new Response(null, { status: 204, headers: cors(env) });
+			}
+			if (!await owner(request, env)) {
+				return reply(401, 'sign in', cors(env));
+			}
+			if (request.method === 'GET' && pathname === '/rows') {
+				return rows(env);
+			}
+			if (request.method === 'POST' && pathname === '/status') {
+				return setStatus(request, env);
+			}
 		}
 		if (request.method === 'GET' && pathname === '/') {
 			return reply(200, 'Advanced Map reports. The data is public: see the repository.');

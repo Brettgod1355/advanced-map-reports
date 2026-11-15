@@ -10,6 +10,13 @@ export const JUMP = 3;
 export const USED_REACH = 8;
 /** One sender may post this many reports a day. */
 export const PER_DAY = 60;
+/**
+ * What the owner marks a row as on the page: '' is new. The page hides "added" (the map has it now) and "ignored"
+ * (not a way, or not one for the map) until they are asked for; a row keeps its status when it is reported again.
+ */
+export const STATUSES = ['', 'investigating', 'added', 'ignored'];
+/** How long a sign-in lasts: 30 days. */
+export const SESSION_MILLIS = 30 * 86400000;
 /** The surface map's rows of regions (Advanced Map's MapArea.SURFACE); everything else is the other map. */
 const SURFACE_ROWS = [30, 65];
 
@@ -72,12 +79,16 @@ export async function mark(address, dayText, salt) {
 	return [...new Uint8Array(hash)].slice(0, 12).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** A stored row as the public file shows it: no mark, no address, days and not times. */
+/**
+ * A stored row as the public file shows it: no mark, no address, days and not times. Its key names the row when the
+ * owner sets its status.
+ */
 export function published(row) {
 	return {
-		k: row.k, id: row.id, op: row.op,
+		key: row.key, k: row.k, id: row.id, op: row.op,
 		at: [row.ax, row.ay, row.ap], from: [row.fx, row.fy, row.fp], to: [row.tx, row.ty, row.tp],
 		reports: row.reports, people: row.people, first: row.first_day, last: row.last_day, v: row.version,
+		status: row.status || '',
 	};
 }
 
@@ -87,4 +98,43 @@ export function file(rows) {
 	out.sort((a, b) => b.people - a.people || b.reports - a.reports || (a.last < b.last ? 1 : a.last > b.last ? -1 : 0)
 		|| a.id - b.id || a.at.join().localeCompare(b.at.join()));
 	return JSON.stringify(out, null, 1) + '\n';
+}
+
+const base64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
+	.replace(/[+]/g, '-').replace(/[/]/g, '_').replace(/=+$/, '');
+
+async function signature(text, secret) {
+	const signer = await crypto.subtle.importKey('raw', new TextEncoder().encode('session|' + secret),
+		{ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+	return base64url(await crypto.subtle.sign('HMAC', signer, new TextEncoder().encode(text)));
+}
+
+/**
+ * A sign-in for the page to keep: GitHub's numeric user id and the moment it runs out, signed with the receiver's
+ * secret so that nobody else can make or change one. "50088793.1765000000000.<signature>".
+ */
+export async function session(id, until, secret) {
+	if (!secret) {
+		throw new Error('no secret to sign with');
+	}
+	const body = id + '.' + until;
+	return body + '.' + await signature(body, secret);
+}
+
+/** Whose sign-in a token is: the user id, or null when it is not one of ours, was changed, or has run out. */
+export async function sessionId(token, now, secret) {
+	const parts = typeof token === 'string' ? token.split('.') : [];
+	if (!secret || parts.length !== 3 || !/^[0-9]{1,20}$/.test(parts[0]) || !/^[0-9]{1,16}$/.test(parts[1])) {
+		return null;
+	}
+	const want = await signature(parts[0] + '.' + parts[1], secret);
+	if (want.length !== parts[2].length) {
+		return null;
+	}
+	// every character is compared, so how long a wrong signature takes says nothing about where it went wrong
+	let differ = 0;
+	for (let i = 0; i < want.length; i++) {
+		differ |= want.charCodeAt(i) ^ parts[2].charCodeAt(i);
+	}
+	return differ === 0 && Number(parts[1]) > now ? parts[0] : null;
 }

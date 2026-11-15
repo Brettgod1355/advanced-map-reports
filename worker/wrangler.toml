@@ -8,6 +8,11 @@ crons = ["*/30 * * * *"]
 
 [vars]
 GITHUB_REPO = "Brettgod1355/advanced-map-reports"
+# the page: where a sign-in returns to, and the only site whose scripts may call /rows and /status
+SITE = "https://brettgod1355.github.io/advanced-map-reports/"
+# the one GitHub account that may set a row's status, by its numeric user id (public, and it stays the same if the
+# account is renamed): the number before the + in the account's noreply address
+ADMIN_ID = "50088793"
 
 # fill in the id that `npx wrangler d1 create advanced-map-reports` prints
 [[d1_databases]]
