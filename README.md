@@ -5,6 +5,9 @@ plugin for RuneLite has no transport for yet, collected from players who turn on
 "Report missing transports" setting. The grouped reports are public: see the page this repository serves, or
 [`docs/data/reports.json`](docs/data/reports.json).
 
+Website showing data found missing from the map:
+https://brettgod1355.github.io/advanced-map-reports/
+
 ## What is collected
 
 A report is seven numbers and the plugin's version:
