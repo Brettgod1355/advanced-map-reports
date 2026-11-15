@@ -1,8 +1,11 @@
 // What a report must look like, how reports are grouped, and what is published. No network or storage here, so it
 // can be tested with plain Node (worker/test).
 
-/** The plugin's jump rule: onto the other map, or more than this many tiles in one go. */
-export const JUMP = 24;
+/**
+ * The plugin's trip rule: onto the other map, or more than this many tiles in one go (a run covers 2). Short ways
+ * count too, like the Baxtorian Falls log raft's 13 tiles (was 24 until 2026-11-15).
+ */
+export const JUMP = 3;
 /** The object or NPC used must be this near where the player stood. */
 export const USED_REACH = 8;
 /** One sender may post this many reports a day. */
@@ -36,7 +39,7 @@ export function clean(body) {
 		|| !isInt(id, 0, 200000) || !isInt(op, 1, 5) || !isTile(at) || !isTile(from) || !isTile(to)) {
 		return null;
 	}
-	// a jump, begun beside what was used: anything else is not what the plugin sends
+	// a trip, begun beside what was used: anything else is not what the plugin sends
 	const jumped = surface(from) !== surface(to) || flat(from, to) > JUMP;
 	if (!jumped || surface(at) !== surface(from) || flat(at, from) > USED_REACH) {
 		return null;

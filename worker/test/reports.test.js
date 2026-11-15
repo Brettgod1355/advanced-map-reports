@@ -11,15 +11,16 @@ test('a report is numbers in range and a real jump', () => {
 		null, [], 'text', { ...good, v: '1.2 <script>' }, { ...good, v: 12 }, { ...good, k: 'x' },
 		{ ...good, id: -1 }, { ...good, id: 1.5 }, { ...good, id: '14880' }, { ...good, op: 0 }, { ...good, op: 6 },
 		{ ...good, at: [3209, 3216] }, { ...good, to: [3210, 99999, 0] }, { ...good, from: [3210, 3216, 4] },
-		// a walk, not a jump
-		{ ...good, to: [3215, 3220, 0] },
+		// a walk or a run, not a trip
+		{ ...good, to: [3213, 3219, 0] },
 		// what was used is nowhere near where the player stood
 		{ ...good, at: [3300, 3216, 0] },
 	]) {
 		assert.equal(clean(bad), null, JSON.stringify(bad));
 	}
-	// a long way on one map is a jump too (a boat)
+	// a long way on one map is a trip too (a boat), and so is a short one (a raft, a ferry of a few tiles)
 	assert.notEqual(clean({ ...good, to: [3210 + 25, 3216, 0] }), null);
+	assert.notEqual(clean({ ...good, to: [3214, 3216, 0] }), null);
 });
 
 test('reports of one way share a row', () => {
